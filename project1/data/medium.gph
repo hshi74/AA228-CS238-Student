@@ -1,0 +1,16 @@
+fixedacidity, ph
+volatileacidity, alcohol
+citricacid, fixedacidity
+chlorides, citricacid
+chlorides, quality
+totalsulfurdioxide, freesulfurdioxide
+density, citricacid
+density, residualsugar
+density, totalsulfurdioxide
+density, sulphates
+alcohol, totalsulfurdioxide
+alcohol, density
+alcohol, ph
+alcohol, sulphates
+quality, volatileacidity
+quality, alcohol

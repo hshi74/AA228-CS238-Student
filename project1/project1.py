@@ -1,14 +1,14 @@
 import graphviz
-import itertools
-import networkx as nx
 import numpy as np
+import networkx as nx
 import pandas as pd
 import pdb
 import shutil
 import sys
 import time
 
-from scipy.special import gammaln
+from scipy.special import loggamma
+from tqdm import tqdm
 
 
 def write_gph(dag, idx2names, filename):
@@ -17,13 +17,102 @@ def write_gph(dag, idx2names, filename):
             f.write(f"{idx2names[edge[0]]}, {idx2names[edge[1]]}\n")
 
 
-def compute(infile, outfile):
-    # WRITE YOUR CODE HERE
-    # FEEL FREE TO CHANGE ANYTHING ANYWHERE IN THE CODE
-    # THIS INCLUDES CHANGING THE FUNCTION NAMES, MAKING THE CODE MODULAR, BASICALLY ANYTHING
-    # pass
+def draw_graph(G, idx2names, filename):
+    G = nx.relabel_nodes(G, idx2names)
+    nx.drawing.nx_pydot.write_dot(G, filename)
+    img_file = graphviz.render('dot', 'png', filename)
+    shutil.move(img_file, filename)
 
-    data = pd.read_csv(infile)
+
+def init_graph(data):
+    G = nx.DiGraph()
+    G.add_nodes_from(list(data.columns))
+    return G
+
+
+def get_m_alpha(node, parents, data):
+    sizes = data.loc[:, parents + [node]].groupby(parents + [node]).size()
+    if len(parents) > 0:
+        m = sizes.unstack(fill_value=0).values
+    else:
+        m = sizes.values[None]
+    alpha = np.ones(m.shape)
+    m_0 = np.sum(m, axis=1)
+    alpha_0 = np.sum(alpha, axis=1)
+    return m, m_0, alpha, alpha_0
+
+
+def bayesian_score_component(G, node, data):
+    parents = list(G.pred[node])
+    m, m_0, alpha, alpha_0 = get_m_alpha(node, parents, data)
+    score = np.sum(loggamma(alpha_0) - loggamma(alpha_0 + m_0)) + np.sum(loggamma(alpha + m) - loggamma(alpha))
+    return score
+
+
+def bayesian_score(G, data):
+    return [bayesian_score_component(G, node, data) for node in G]
+
+
+def k2(G, data):
+    for node in G:
+        score_cur = bayesian_score_component(G, node, data)
+        while True:
+            score_best = float('-inf')
+            parent_best = None
+
+            for parent in G:
+                if parent == node or parent in G.pred[node] or node in G.pred[parent]:
+                    continue
+
+                G.add_edge(parent, node)
+                score_new = bayesian_score_component(G, node, data)
+                if nx.is_directed_acyclic_graph(G) and score_new > score_best:
+                    score_best = score_new
+                    parent_best = parent
+
+                G.remove_edge(parent, node)
+
+            if parent_best and (score_cur == 0 or score_best > score_cur):
+                score_cur = score_best
+                G.add_edge(parent_best, node)
+            else:
+                break
+
+
+def rand_graph_neighbor(G):
+    n = nx.number_of_nodes(G)
+    i = np.random.randint(0, n)
+    j = (i + np.random.randint(1, n)) % n
+    G_ = G.copy()
+    if G.has_edge(i, j):
+        G_.remove_edge(i, j)
+        if np.random.rand() > 0.5:
+            G_.add_edge(j, i)
+    else:
+        G_.add_edge(i, j)
+    return G_
+
+
+def local_search(G, D, k_max=1000):
+    y = sum(bayesian_score(G, D))
+    for k in tqdm(range(k_max)):
+        G_ = rand_graph_neighbor(G)
+        if nx.is_directed_acyclic_graph(G_):
+            y_ = sum(bayesian_score(G_, D))
+        else:
+            y_ = float('-inf')
+
+        if y_ > y:
+            y, G = y_, G_
+
+    return G
+
+
+def compute(dataset_size):
+    k_max_dict = {'small': 1000, 'medium': 1000, 'large': 10000}
+    
+    data = pd.read_csv(f'data/{dataset_size}.csv')
+
     idx2names = {}
 
     for idx, col in enumerate(data.columns):
@@ -34,135 +123,21 @@ def compute(infile, outfile):
 
     G = init_graph(data)
 
-    start_time = time.time()
-    while True:
-        score = bayesian_score(G, data)
-        k2(G, data, 1)
-        edge_direction_optimization(G, data)
-        if score == bayesian_score(G, data):
-            break
+    start = time.time()
+    k2(G, data)
+    G = local_search(G, data, k_max=k_max_dict[dataset_size])
+    score = sum(bayesian_score(G, data))
+    end = time.time()
+    
+    write_gph(G, idx2names, f'data/{dataset_size}.gph')
+    draw_graph(G, idx2names, f'data/{dataset_size}.png')
 
-    end_time = time.time()
-
-    write_gph(G, idx2names, outfile)
-    draw_graph(G, idx2names, infile.replace('csv', 'png'))
-
-    print(f'time spent : {end_time - start_time}, final score: {score}')
-
-
-def init_graph(data):
-    G = nx.DiGraph()
-    G.add_nodes_from(list(data.columns))
-    return G
-
-
-def bayesian_score_component(G, node, data, parent_func_name=''):
-    score = 0
-    ri = max(data[node])
-    parents = sorted(list(G.pred[node]))
-
-    for inst in itertools.product(*[data[p].unique() for p in parents]):
-        temp = data.copy()
-        if parent_func_name == 'k2':
-            pass
-        for l in range(len(parents)):
-            temp = temp[temp[parents[l]] == inst[l]]
-
-        score += gammaln(ri) - gammaln(ri + len(temp))
-
-        for k in range(ri):
-            m = len(temp[temp[node]] == k + 1)
-            score += gammaln(1 + m)
-
-    return score
-
-
-def bayesian_score(G, data):
-    return sum(bayesian_score_component(G, node, data) for node in G)
-
-
-def draw_graph(G, idx2names, filename):
-    G = nx.relabel_nodes(G, idx2names)
-    nx.drawing.nx_pydot.write_dot(G, filename)
-    img_file = graphviz.render('dot', 'png', filename)
-    shutil.move(img_file, filename)
-
-
-def k2(G, data, parent_count):
-    print('Running k2 algorithm')
-    scores = [bayesian_score_component(G, node, data) for node in G]
-    # print('scores: ', scores)
-
-    for idx, node in enumerate(G):
-        parents = []
-
-        while True:
-            curr_score = sum(scores)
-            curr_best_local_score = scores[idx]
-            curr_best_parent = None
-
-            for new_parent in G:
-                Gtemp = G.copy()
-
-                if new_parent == node or new_parent in Gtemp.pred[node] or node in Gtemp.pred[new_parent]:
-                    continue
-
-                Gtemp.add_edge(new_parent, node)
-                new_local_score = bayesian_score_component(Gtemp, node, data, 'k2')
-                if nx.is_directed_acyclic_graph(Gtemp) and new_local_score < curr_best_local_score:
-                    curr_best_local_score = new_local_score
-                    curr_best_parent = new_parent
-
-            if curr_best_parent:
-                G.add_edge(curr_best_parent, node)
-                parents.append(curr_best_parent)
-                scores[idx] = curr_best_local_score
-
-                print(f'{curr_score} -> {sum(scores)}')
-
-                if len(parents) >= parent_count:
-                    break
-
-            else:
-                break
-
-
-def edge_direction_optimization(G, data):
-    print('Running edge direction optimization')
-    scores = {node: bayesian_score_component(G, node, data) for node in G}
-
-    for edge in list(G.edges):
-        curr_score = sum(scores.values())
-        Gtemp = G.copy()
-
-        parent, child = edge
-        parent_score = scores[parent]
-        child_score = scores[child]
-        Gtemp.remove_edge(*edge)
-        Gtemp.add_edge(*edge[::-1])
-
-        if not nx.is_directed_acyclic_graph(Gtemp):
-            continue
-
-        new_parent_score = bayesian_score_component(Gtemp, parent, data)
-        new_child_score = bayesian_score_component(Gtemp, child, data)
-
-        if new_parent_score + new_child_score < parent_score + child_score:
-            print(f'swap {parent} -> {child}')
-            G.remove_edge(*edge)
-            G.add_edge(*edge[::-1])
-            scores[parent] = new_parent_score
-            scores[child] = new_child_score
-            print(f'{curr_score} -> {sum(scores.values())}')
+    print(f'time spent: {end - start} | score: {score}')
 
 
 def main():
-    if len(sys.argv) != 3:
-        raise Exception("usage: python project1.py <infile>.csv <outfile>.gph")
-
-    inputfilename = sys.argv[1]
-    outputfilename = sys.argv[2]
-    compute(inputfilename, outputfilename)
+    dataset_size = sys.argv[1]
+    compute(dataset_size)
 
 
 if __name__ == '__main__':
